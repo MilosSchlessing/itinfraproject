@@ -1,23 +1,41 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless Image Processing Pipeline with Rekognition
+
 Resources:
-  MyLambdaFunction:
+  # 1. S3 Bucket für Bilder
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: milesprojectbucket
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT, POST]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+
+  # 2. Lambda-Funktion
+  ImageProcessor:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: MyAPIGatewayLambda
+      FunctionName: ImageProcessor
       Runtime: python3.8
       Handler: index.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
       Code:
         ZipFile: |
           import json
           import boto3
-          
-          sns = boto3.client('sns')
-          
           def lambda_handler(event, context):
-              # Lambda Code hier einfügen
-              pass
+              rekognition = boto3.client('rekognition')
+              response = rekognition.detect_labels(
+                  Image={'S3Object': {'Bucket': event['Records'][0]['s3']['bucket']['name'], 
+                                     'Name': event['Records'][0]['s3']['object']['key']}},
+                  MaxLabels=10)
+              return {'labels': [label['Name'] for label in response['Labels']]}
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 512
+      Timeout: 30
 
+  # 3. IAM-Rolle für Lambda
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -25,87 +43,52 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: LambdaPermissions
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - sns:Publish
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: "*"
+            Principal: { Service: [lambda.amazonaws.com] }
+            Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRekognitionReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
 
-  MyApiGateway:
-    Type: AWS::ApiGateway::RestApi
-    Properties:
-      Name: MyServerlessAPI
-      Description: API for serverless application
-
-  ApiResourceText:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MyApiGateway
-      ParentId: !GetAtt MyApiGateway.RootResourceId
-      PathPart: process-text
-
-  ApiResourceImage:
-    Type: AWS::ApiGateway::Resource
-    Properties:
-      RestApiId: !Ref MyApiGateway
-      ParentId: !GetAtt MyApiGateway.RootResourceId
-      PathPart: process-image
-
-  ApiMethodText:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MyApiGateway
-      ResourceId: !Ref ApiResourceText
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS
-        IntegrationHttpMethod: POST
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations
-        IntegrationResponses:
-          - StatusCode: 200
-      MethodResponses:
-        - StatusCode: 200
-
-  ApiMethodImage:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref MyApiGateway
-      ResourceId: !Ref ApiResourceImage
-      HttpMethod: POST
-      AuthorizationType: NONE
-      Integration:
-        Type: AWS
-        IntegrationHttpMethod: POST
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations
-        IntegrationResponses:
-          - StatusCode: 200
-      MethodResponses:
-        - StatusCode: 200
-
-  ApiDeployment:
-    Type: AWS::ApiGateway::Deployment
-    DependsOn:
-      - ApiMethodText
-      - ApiMethodImage
-    Properties:
-      RestApiId: !Ref MyApiGateway
-      StageName: prod
-
+  # 4. S3-Trigger für Lambda
   LambdaPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !GetAtt MyLambdaFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyApiGateway}/*/POST/*
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt ImageProcessor.Arn
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt ImageBucket.Arn
+
+  # 5. S3 Event Notification
+  BucketNotification:
+    Type: Custom::S3BucketNotification
+    DependsOn: LambdaPermission
+    Properties:
+      ServiceToken: !GetAtt BucketNotificationConfigurator.Arn
+      BucketName: !Ref ImageBucket
+      NotificationConfiguration:
+        LambdaFunctionConfigurations:
+          - Events: ['s3:ObjectCreated:*']
+            LambdaFunctionArn: !GetAtt ImageProcessor.Arn
+
+  # 6. Custom Resource für Bucket Notifications
+  BucketNotificationConfigurator:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.8
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          def handler(event, context):
+              s3 = boto3.client('s3')
+              s3.put_bucket_notification_configuration(
+                  Bucket=event['ResourceProperties']['BucketName'],
+                  NotificationConfiguration=event['ResourceProperties']['NotificationConfiguration'])
+
+Outputs:
+  BucketName:
+    Value: !Ref ImageBucket
+  LambdaArn:
+    Value: !GetAtt ImageProcessor.Arn

@@ -1,94 +1,18 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Serverless Image Processing Pipeline with Rekognition
+Description: DynamoDB-Tabelle für MilesPictures
 
 Resources:
-  # 1. S3 Bucket für Bilder
-  ImageBucket:
-    Type: AWS::S3::Bucket
+  MilesPicturesTable:
+    Type: AWS::DynamoDB::Table
     Properties:
-      BucketName: milesprojectbucket
-      CorsConfiguration:
-        CorsRules:
-          - AllowedMethods: [PUT, POST]
-            AllowedOrigins: ["*"]
-            AllowedHeaders: ["*"]
-
-  # 2. Lambda-Funktion
-  ImageProcessor:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: ImageProcessor
-      Runtime: python3.8
-      Handler: index.lambda_handler
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          def lambda_handler(event, context):
-              rekognition = boto3.client('rekognition')
-              response = rekognition.detect_labels(
-                  Image={'S3Object': {'Bucket': event['Records'][0]['s3']['bucket']['name'], 
-                                     'Name': event['Records'][0]['s3']['object']['key']}},
-                  MaxLabels=10)
-              return {'labels': [label['Name'] for label in response['Labels']]}
-      Role: !GetAtt LambdaExecutionRole.Arn
-      MemorySize: 512
-      Timeout: 30
-
-  # 3. IAM-Rolle für Lambda
-  LambdaExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: { Service: [lambda.amazonaws.com] }
-            Action: ['sts:AssumeRole']
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonRekognitionReadOnlyAccess
-        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
-
-  # 4. S3-Trigger für Lambda
-  LambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: 'lambda:InvokeFunction'
-      FunctionName: !GetAtt ImageProcessor.Arn
-      Principal: s3.amazonaws.com
-      SourceArn: !GetAtt ImageBucket.Arn
-
-  # 5. S3 Event Notification
-  BucketNotification:
-    Type: Custom::S3BucketNotification
-    DependsOn: LambdaPermission
-    Properties:
-      ServiceToken: !GetAtt BucketNotificationConfigurator.Arn
-      BucketName: !Ref ImageBucket
-      NotificationConfiguration:
-        LambdaFunctionConfigurations:
-          - Events: ['s3:ObjectCreated:*']
-            LambdaFunctionArn: !GetAtt ImageProcessor.Arn
-
-  # 6. Custom Resource für Bucket Notifications
-  BucketNotificationConfigurator:
-    Type: AWS::Lambda::Function
-    Properties:
-      Runtime: python3.8
-      Handler: index.handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Code:
-        ZipFile: |
-          import boto3
-          def handler(event, context):
-              s3 = boto3.client('s3')
-              s3.put_bucket_notification_configuration(
-                  Bucket=event['ResourceProperties']['BucketName'],
-                  NotificationConfiguration=event['ResourceProperties']['NotificationConfiguration'])
-
-Outputs:
-  BucketName:
-    Value: !Ref ImageBucket
-  LambdaArn:
-    Value: !GetAtt ImageProcessor.Arn
+      TableName: MilesPictures
+      AttributeDefinitions:
+        - AttributeName: pictureName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pictureName
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      Tags:
+        - Key: Environment
+          Value: Production
